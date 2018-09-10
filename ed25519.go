@@ -415,7 +415,7 @@ func GenerateJointPrivateKey(publicKey1, publicKey2 PublicKey, privateKey Privat
 		panic("ed25519: invalid n provided to GenerateJointPrivateKey")
 	}
 
-	var privateKeyBytes, primeBytes, zero [32]byte
+	var privateKeyBytes, primeBytes [32]byte
 	edwards25519.ScReduce(&primeBytes, &primeDigest)
 	digest := sha512.Sum512(privateKey[:32])
 	digest[0] &= 248
@@ -425,7 +425,7 @@ func GenerateJointPrivateKey(publicKey1, publicKey2 PublicKey, privateKey Privat
 
 	// we don't have a ScMul fn, so emulate with a*b + 0
 	var jointX [32]byte
-	edwards25519.ScMulAdd(&jointX, &primeBytes, &privateKeyBytes, &zero)
+	edwards25519.ScMul(&jointX, &primeBytes, &privateKeyBytes)
 	jointPrivateKey = make([]byte, PrivateKeySize)
 	copy(jointPrivateKey[:32], jointX[:])
 
