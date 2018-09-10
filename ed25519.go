@@ -331,118 +331,129 @@ func Verify(publicKey PublicKey, message, sig []byte) bool {
 	return bytes.Equal(sig[:32], checkR[:])
 }
 
-func GenerateJointKey(publicKey1 PublicKey, publicKey2 PublicKey) (jointKey, key1Prime, key2Prime PublicKey, err error) {
-	if l := len(publicKey1); l != PublicKeySize {
-		panic("ed25519: bad public key length: " + strconv.Itoa(l))
+// Takes n pubkeys: P1, P2, ..., Pn
+// Returns n+1 pubkeys: an aggregate joint key, J, as well as
+// n modified pubkeys: P'1, P'2, ..., P'n
+// Implemented as described in:
+// https://blockstream.com/2018/01/23/musig-key-aggregation-schnorr-signatures.html
+func GenerateJointKey(publicKeys []PublicKey) (jointKey PublicKey, primeKeys []PublicKey, err error) {
+	for _, publicKey := range publicKeys {
+		if l := len(publicKey); l != PublicKeySize {
+			panic("ed25519: bad public key length: " + strconv.Itoa(l))
+		}
 	}
-	if l := len(publicKey2); l != PublicKeySize {
-		panic("ed25519: bad public key length: " + strconv.Itoa(l))
-	}
-	var jointHash, prime1Digest, prime2Digest [64]byte
+	var jointHash [64]byte
+	primeDigests := make([][64]byte, len(publicKeys))
 	h := sha512.New()
 
-	// H(P_A||P_B)
-	h.Write(publicKey1[:])
-	h.Write(publicKey2[:])
+	// L = H(P1 || P2 || ... || Pn)
+	for _, publicKey := range publicKeys {
+		h.Write(publicKey[:])
+	}
 	h.Sum(jointHash[:0])
 
-	// P_A' = H(H(P_A||P_B) || P_A) * P_A
-	h.Reset()
-	h.Write(jointHash[:])
-	h.Write(publicKey1[:])
-	h.Sum(prime1Digest[:0])
-
-	// P_B' = H(H(P_A||P_B) || P_B) * P_B
-	h.Reset()
-	h.Write(jointHash[:])
-	h.Write(publicKey2[:])
-	h.Sum(prime2Digest[:0])
-
-	var prime1Bytes, prime2Bytes [32]byte
-	edwards25519.ScReduce(&prime1Bytes, &prime1Digest)
-	edwards25519.ScReduce(&prime2Bytes, &prime2Digest)
-
-	var publicKey1Bytes, publicKey2Bytes [32]byte
-	copy(publicKey1Bytes[:], publicKey1)
-	copy(publicKey2Bytes[:], publicKey2)
-
-	var A, APrime, B, BPrime, J edwards25519.ExtendedGroupElement
-	if !A.FromBytes(&publicKey1Bytes) {
-		return nil, nil, nil, errors.New("ed25519: cannot build pubkey from bytes")
+	// P'i = H(L || Pi) * Pi - here we calculate
+	// primeDigests[i] = H(L || Pi)
+	for i, publicKey := range publicKeys {
+		h.Reset()
+		h.Write(jointHash[:])
+		h.Write(publicKey[:])
+		h.Sum(primeDigests[i][:0])
 	}
-	if !B.FromBytes(&publicKey2Bytes) {
-		return nil, nil, nil, errors.New("ed25519: cannot build pubkey from bytes")
+
+	// reduce our primeDigests to proper scalars
+	primeBytesList := make([][32]byte, len(publicKeys))
+	for i, primeDigest := range primeDigests {
+		edwards25519.ScReduce(&primeBytesList[i], &primeDigest)
 	}
-	edwards25519.GeScalarMult(&APrime, &prime1Bytes, &A)
-	edwards25519.GeScalarMult(&BPrime, &prime2Bytes, &B)
-	edwards25519.GeAdd(&J, &APrime, &BPrime)
-	var jointKeyBytes, key1PrimeBytes, key2PrimeBytes [32]byte
+
+	publicKeyBytesList := make([][32]byte, len(publicKeys))
+	for i, publicKey := range publicKeys {
+		copy(publicKeyBytesList[i][:], publicKey)
+	}
+
+	keyPrimeBytesList := make([][32]byte, len(publicKeys))
+	keyPrimeList := make([]PublicKey, 0, len(publicKeys))
+	// P'i = H(L || Pi) * Pi - here we calculate P'i
+	// as well as J = Sum(P'i)
+	PubkeyElems := make([]edwards25519.ExtendedGroupElement, len(publicKeys))
+	PubkeyPrimeElems := make([]edwards25519.ExtendedGroupElement, len(publicKeys))
+	for i, publicKeyBytes := range publicKeyBytesList {
+		if !PubkeyElems[i].FromBytes(&publicKeyBytes) {
+			return nil, nil, errors.New("ed25519: cannot build pubkey from bytes")
+		}
+		edwards25519.GeScalarMult(&PubkeyPrimeElems[i], &primeBytesList[i], &PubkeyElems[i])
+		// convert everything to PublicKeys for return
+		PubkeyPrimeElems[i].ToBytes(&keyPrimeBytesList[i])
+		keyPrime := make([]byte, PublicKeySize)
+		copy(keyPrime[:], keyPrimeBytesList[i][:])
+		keyPrimeList = append(keyPrimeList, keyPrime)
+	}
+
+	var J edwards25519.ExtendedGroupElement
+	var jointKeyBytes [32]byte
+	edwards25519.GeAdd(&J, &PubkeyPrimeElems[0], &PubkeyPrimeElems[1])
+	for i := 2; i < len(publicKeys); i++ {
+		edwards25519.GeAdd(&J, &J, &PubkeyPrimeElems[i])
+		J.ToBytes(&jointKeyBytes)
+	}
+
 	J.ToBytes(&jointKeyBytes)
-	APrime.ToBytes(&key1PrimeBytes)
-	BPrime.ToBytes(&key2PrimeBytes)
-
 	jointKey = make([]byte, PublicKeySize)
-	key1Prime = make([]byte, PublicKeySize)
-	key2Prime = make([]byte, PublicKeySize)
 	copy(jointKey[:], jointKeyBytes[:])
-	copy(key1Prime[:], key1PrimeBytes[:])
-	copy(key2Prime[:], key2PrimeBytes[:])
-	return jointKey, key1Prime, key2Prime, err
+
+	return jointKey, keyPrimeList, err
 }
 
-func GenerateJointPrivateKey(publicKey1, publicKey2 PublicKey, privateKey PrivateKey, n int) (jointPrivateKey PrivateKey, err error) {
+func GenerateJointPrivateKey(publicKeys []PublicKey, privateKey PrivateKey, n int) (jointPrivateKey PrivateKey, err error) {
 	var jointHash, primeDigest [64]byte
 	h := sha512.New()
 
-	// H(P_A||P_B)
-	h.Write(publicKey1[:])
-	h.Write(publicKey2[:])
+	// L = H(P1 || P2 || ... || Pn)
+	for _, publicKey := range publicKeys {
+		h.Write(publicKey[:])
+	}
 	h.Sum(jointHash[:0])
 
-	// x_A' = H(H(P_A||P_B) || P_A) * x_A
-	if n == 0 {
-		h.Reset()
-		h.Write(jointHash[:])
-		h.Write(publicKey1[:])
-		h.Sum(primeDigest[:0])
-	// x_B' = H(H(P_A||P_B) || P_B) * x_B
-	} else if n == 1 {
-		h.Reset()
-		h.Write(jointHash[:])
-		h.Write(publicKey2[:])
-		h.Sum(primeDigest[:0])
-	} else {
-		panic("ed25519: invalid n provided to GenerateJointPrivateKey")
-	}
+	// x'i = H(L || Pi) * xi
+	// this calculates H(L || Pi)
+	h.Reset()
+	h.Write(jointHash[:])
+	h.Write(publicKeys[n][:])
+	h.Sum(primeDigest[:0])
 
 	var privateKeyBytes, primeBytes [32]byte
+	// here we reduce to a proper scalar
 	edwards25519.ScReduce(&primeBytes, &primeDigest)
+
+	// here we calculate H(L || Pi) * xi
 	digest := sha512.Sum512(privateKey[:32])
 	digest[0] &= 248
 	digest[31] &= 127
 	digest[31] |= 64
 	copy(privateKeyBytes[:], digest[:])
 
-	// we don't have a ScMul fn, so emulate with a*b + 0
 	var jointX [32]byte
 	edwards25519.ScMul(&jointX, &primeBytes, &privateKeyBytes)
 	jointPrivateKey = make([]byte, PrivateKeySize)
 	copy(jointPrivateKey[:32], jointX[:])
 
-	jointPublicKey, _, _, err := GenerateJointKey(publicKey1, publicKey2)
+	jointPublicKey, _, err := GenerateJointKey(publicKeys)
 	copy(jointPrivateKey[32:], jointPublicKey[:])
 	return jointPrivateKey, err
 }
 
-// H(R_A + R_B || J(A, B) || m) = e
-// s_A = r_A + e * x_A'
-// s_B = r_B + e * x_B'
-func JointSign(privateKey, jointPrivateKey PrivateKey, noncePoint1, noncePoint2 CurvePoint, message []byte) []byte {
+// H(R1 + R2 + ... + Rn || J(P1, P2, ..., Pn) || m) = e
+// si = ri + e * x'i
+func JointSign(privateKey, jointPrivateKey PrivateKey, noncePoints []CurvePoint, message []byte) []byte {
 	if l := len(privateKey); l != PrivateKeySize {
 		panic("ed25519: bad private key length: " + strconv.Itoa(l))
 	}
 	if l := len(jointPrivateKey); l != PrivateKeySize {
 		panic("ed25519: bad joint private key length: " + strconv.Itoa(l))
+	}
+	if len(noncePoints) < 2 {
+		panic("ed25519: need at least 2 nonce points to create a joint signature")
 	}
 
 	h := sha512.New()
@@ -450,29 +461,32 @@ func JointSign(privateKey, jointPrivateKey PrivateKey, noncePoint1, noncePoint2 
 	copy(secretKey[:], jointPrivateKey[:32])
 	var messageDigest [64]byte
 
-	h.Reset()
-	// R_A + R_B
-	var summedR, noncePoint1Element, noncePoint2Element edwards25519.ExtendedGroupElement
-	var noncePoint1Bytes, noncePoint2Bytes [32]byte
-	copy(noncePoint1Bytes[:], noncePoint1[:])
-	copy(noncePoint2Bytes[:], noncePoint2[:])
-	if !noncePoint1Element.FromBytes(&noncePoint1Bytes) {
-		panic("ed25519: unable to parse nonce point")
+	// R = Sum(Ri)
+	var summedR edwards25519.ExtendedGroupElement
+	noncePointElements := make([]edwards25519.ExtendedGroupElement, len(noncePoints))
+	noncePointBytesList := make([][32]byte, len(noncePoints))
+	for i, noncePoint := range noncePoints {
+		copy(noncePointBytesList[i][:], noncePoint[:])
+		if !noncePointElements[i].FromBytes(&noncePointBytesList[i]) {
+			panic("ed25519: unable to parse nonce point")
+		}
 	}
-	if !noncePoint2Element.FromBytes(&noncePoint2Bytes) {
-		panic("ed25519: unable to parse nonce point")
+	edwards25519.GeAdd(&summedR, &noncePointElements[0], &noncePointElements[1])
+	for i := 2; i < len(noncePoints); i++ {
+		edwards25519.GeAdd(&summedR, &summedR, &noncePointElements[i])
 	}
-	edwards25519.GeAdd(&summedR, &noncePoint1Element, &noncePoint2Element)
 	var encodedR [32]byte
 	summedR.ToBytes(&encodedR)
+
+	h.Reset()
 	h.Write(encodedR[:])
-	// J(A, B)
+	// J(P1, P2, ..., Pn)
 	h.Write(jointPrivateKey[32:])
 	// m
 	h.Write(message)
 	h.Sum(messageDigest[:0])
 
-	// e = H(R_A + R_B || J(A, B) || m)
+	// e = H(R1 + R2 + ... + Rn || J(P1, P2, ..., Pn) || m)
 	var e [32]byte
 	edwards25519.ScReduce(&e, &messageDigest)
 
@@ -480,7 +494,6 @@ func JointSign(privateKey, jointPrivateKey PrivateKey, noncePoint1, noncePoint2 
 	r = GenerateNonce(privateKey, message)
 
 	var s [32]byte
-	//edwards25519.ScMulAdd(&s, &e, &expandedSecretKey, &r)
 	edwards25519.ScMulAdd(&s, &e, &secretKey, &r)
 
 	var R edwards25519.ExtendedGroupElement

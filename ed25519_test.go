@@ -210,19 +210,21 @@ func TestJointSignVerify(t *testing.T) {
 	public1, private1, _ := GenerateKey(one)
 	var jointPrivate0, jointPrivate1 PrivateKey
 	var err error
-	jointPrivate0, err = GenerateJointPrivateKey(public0, public1, private0, 0)
+	pubkeys := []PublicKey{public0, public1}
+	jointPrivate0, err = GenerateJointPrivateKey(pubkeys, private0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	jointPrivate1, err = GenerateJointPrivateKey(public0, public1, private1, 1)
+	jointPrivate1, err = GenerateJointPrivateKey(pubkeys, private1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	message := []byte("Hello, world!")
 	noncePoint0 := GenerateNoncePoint(private0, message)
 	noncePoint1 := GenerateNoncePoint(private1, message)
-	s0 := JointSign(private0, jointPrivate0, noncePoint0, noncePoint1, message)
-	s1 := JointSign(private1, jointPrivate1, noncePoint0, noncePoint1, message)
+	noncePoints := []CurvePoint{noncePoint0, noncePoint1}
+	s0 := JointSign(private0, jointPrivate0, noncePoints, message)
+	s1 := JointSign(private1, jointPrivate1, noncePoints, message)
 	sig := AddSignature(s0, s1)
 	jointPublicKey := make([]byte, PublicKeySize)
 	jointPublicKeyBackup := make([]byte, PublicKeySize)
@@ -233,7 +235,9 @@ func TestJointSignVerify(t *testing.T) {
 	}
 
 	// secondary test
-	_, prime0, prime1, _ := GenerateJointKey(public0, public1)
+	_, primeKeys, _ := GenerateJointKey(pubkeys)
+	prime0 := primeKeys[0]
+	prime1 := primeKeys[1]
 	// P_A' should equal x_A' * G
 	var jointPrivateKey0Bytes, prime0CheckBuffer [32]byte
 	copy(jointPrivateKey0Bytes[:], jointPrivate0[:32])
@@ -402,15 +406,17 @@ func TestJointSignWithAdaptor(t *testing.T) {
 	public1, private1, _ := GenerateKey(one)
 	var jointPrivate0, jointPrivate1 PrivateKey
 	var err error
-	jointPrivate0, err = GenerateJointPrivateKey(public0, public1, private0, 0)
+	pubkeys := []PublicKey{public0, public1}
+	jointPrivate0, err = GenerateJointPrivateKey(pubkeys, private0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	jointPrivate1, err = GenerateJointPrivateKey(public0, public1, private1, 1)
+	jointPrivate1, err = GenerateJointPrivateKey(pubkeys, private1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, jointPublic1, _ := GenerateJointKey(public0, public1)
+	_, primeKeys, _ := GenerateJointKey(pubkeys)
+	jointPublic1 := primeKeys[1]
 	jointPublicKey := make([]byte, PublicKeySize)
 	copy(jointPublicKey[:], jointPrivate0[32:])
 	message := []byte("Hello, world!")
